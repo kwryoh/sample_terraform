@@ -16,6 +16,7 @@ provider "aws" {
 resource "aws_instance" "demo" {
   ami           = "ami-02c3627b04781eada" # AmazonLinux2のAMI
   instance_type = "t2.micro"
+  key_name      = "rkw_home"
 
   tags = {
     Name = "tf-demo"
