@@ -21,7 +21,7 @@ provider "aws" {
 
 resource "aws_instance" "app_server" {
   ami           = "ami-830c94e3"
-  instance_type = "t2.micro"
+  instance_type = "t3.micro"
 
   tags = {
     Name = "TFSampleInstance"
@@ -91,7 +91,7 @@ $ install -m 0755 terraform-aws-sample
 $ cd terraform-aws-sample
 ```
 
-### terraform の環境準備
+### terraform の準備
 
 terraform で AWS にインスタンスを構築するに当たり、AWSへのアクセスが必要なため、アクセスキーとシークレットキーを環境変数に設定します。
 
@@ -151,7 +151,7 @@ provider "aws" {
 # ↓を追記
 resource "aws_instance" "demo" {
   ami           = "ami-02c3627b04781eada" # AmazonLinux2のAMI ID
-  instance_type = "t2.micro"
+  instance_type = "t3.micro"
 
   tags = {
     Name = "tf-demo"
@@ -216,37 +216,433 @@ EC2の画面側で確認すると作成したインスタンスが確認でき�
 $ terraform destroy
 ```
 
-### ログイン用SSH鍵の設定
+## ネットワークの作成
 
-このままではインスタンスにアクセスできないため、SSH鍵を設定します。
-先程の resource の中に設定を追加します。
+前述でEC2インスタンスを作成したので、そのインスタンスが外部接続可能なようにネットワークの準備をします。
+それぞれのリソースの細かい説明は割愛します。
+
+![terraform-sample.png](https://rga.qiita.com/files/4a6bf65a-2537-f035-287c-80986e0c2102.png)
+
+### VPC
+
+VPCを構成するため、以下のコードをさきほどの main.tf に追記してください。
 
 ```terraform
-resource "aws_instance" "app_server" {
-  ami           = "ami-830c94e3"
-  instance_type = "t2.micro"
-  key_name      = "登録済みSSH鍵名"
+resource "aws_vpc" "demo_vpc" {
+  cidr_block           = "10.0.0.0/16"
+  enable_dns_hostnames = true
 
   tags = {
-    Name = "TFSampleInstance"
+    Name = "tf-demo"
   }
 }
 ```
 
-AWSマネージメントコンソールの「キーペア」で登録済みSSH鍵を確認し、対象の鍵名を指定します。
+https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc
 
+```sh
+$ terraform plan
+```
 
-
-
-
-
-
-そして、先程と同様に「terraform apply」でインスタンスを作成します。
+で確認し、
 
 ```sh
 $ terraform apply
+```
+
+でVPCを適用させます。
+
+AWSマネジメントコンソールからVPCが作成されているか確認します。
+
+### サブネット
+
+次に、サブネットを構成します。以下のコードをさきほどの main.tf に追記してください。
+
+```terraform
+resource "aws_subnet" "demo_subnet" {
+  vpc_id                  = aws_vpc.demo_vpc.id
+  cidr_block              = "10.0.1.0/24"
+  map_public_ip_on_launch = true
+
+  tags = {
+    Name = "tf-demo"
+  }
+}
+```
+
+https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/subnet
+
+```sh
+$ terraform plan
+```
+
+で適用内容を確認し、
+
+```sh
+$ terraform apply
+```
+
+でサブネットを適用させます。
+
+AWSマネジメントコンソールで作成されているか確認します。
+
+### Internet Gateway
+
+外部アクセスのためInternet Gatewayを作ります。。以下のコードを main.tf に追記してください。
+
+```terraform
+resource "aws_internet_gateway" "demo_igw" {
+  vpc_id = aws_vpc.demo_vpc.id
+
+  tags = {
+    Name = "tf-demo"
+  }
+}
+```
+
+https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/internet_gateway
+
+```sh
+$ terraform plan
+```
+
+で適用内容を確認し、
+
+```sh
+$ terraform apply
+```
+
+で適用させます。AWSマネジメントコンソールで作成されているか確認します。
+
+### Route Table
+
+Internet Gatewayを通じてアクセスができるよう、ルーティング設定をします。
+以下のコードを main.tf に追記します。
+
+```terraform
+resource "aws_route_table" "demo_rt_tbl" {
+  vpc_id = aws_vpc.demo_vpc.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.demo_igw.id
+  }
+
+  tags = {
+    Name = "tf-demo"
+  }
+}
+```
+
+https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/route_table
+
+また、ルーティング設定とサブネットの紐付け設定も追記します。
+
+```terraform
+resource "aws_route_table_association" "demo_rt_assoc" {
+  subnet_id      = aws_subnet.demo_subnet.id
+  route_table_id = aws_route_table.demo_rt_tbl.id
+
+  tags = {
+    Name = "tf-demo"
+  }
+}
+```
+
+https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/route_table_association
+
+```sh
+$ terraform plan
+```
+
+で適用内容を確認し、
+
+```sh
+$ terraform apply
+```
+
+で適用させます。
+
+### Security Group
+
+最後にファイアウォール設定をします。
+今回はSSH接続とWeb接続を許可します。
+まず、大枠のセキュリティグループを作成します。
+
+```terraform
+resource "aws_security_group" "demo_sg" {
+  vpc_id = aws_vpc.demo_vpc.id
+
+  tags = {
+    Name = "tf-demo"
+  }
+}
+```
+
+https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/security_group
+
+次に、ここのルールを追記していきます。
+
+```terraform
+# Outbound 設定
+resource "aws_security_group_rule" "demo_egress_allow_all" {
+  type              = "egress"
+  from_port         = 0
+  to_port           = 0
+  protocol          = "-1"
+  security_group_id = aws_security_group.demo_sg.id
+}
+
+# SSH接続
+resource "aws_security_group_rule" "demo_allow_ssh" {
+  description       = "Allow SSH"
+  type              = "ingress"
+  from_port         = 22
+  to_port           = 22
+  protocol          = "tcp"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = aws_security_group.demo_sg.id
+}
+
+# HTTP接続
+resource "aws_security_group_rule" "demo_allow_http" {
+  description       = "Allow HTTP"
+  type              = "ingress"
+  from_port         = 80
+  to_port           = 80
+  protocol          = "tcp"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = aws_security_group.demo_sg.id
+}
+```
+
+一通り記述したら、
+
+```sh
+$ terraform plan
+```
+
+で適用内容を確認し、
+
+```sh
+$ terraform apply
+```
+
+で適用させます。
+
+これで一通りの準備が整いました。（ElasticIPを使いたい場合はElasticIPのリソースも作成します）
+
+## EC2の外部公開
+
+EC2を作成したVPC、セキュリティグループに所属させることで外部からアクセスできるようにしていきます。
+
+### EC2をサブネットに所属させる
+
+初めに記載したEC2リソースの記述を下記のように編集します。
+
+```terraform
+resource "aws_instance" "demo" {
+  ami                    = "ami-02c3627b04781eada" # AmazonLinux2のAMI ID
+  instance_type          = "t3.micro"
+  # ↓追記
+  subnet_id              = aws_subnet.demo_subnet.id
+  vpc_security_group_ids = [aws_security_group.demo_sg.id]
+  # ↑ここまで
+
+  tags = {
+    Name = "tf-demo"
+  }
+}
+```
+
+いつもどおり
+
+```sh
+$ terraform plan
+```
+
+で適用内容を確認し、
+
+```sh
+$ terraform apply
+```
+
+で適用させます。
+
+
+### ログイン用SSH鍵を設定
+
+最後にSSH接続ができるようにインスタンスに設置する鍵を指定します。
+なお、SSH鍵は先にAWSマネジメントコンソールで作成しておきます。
+
+先程のEC2インスタンスのリソースに設定を追加します。
+
+```terraform
+resource "aws_instance" "demo" {
+  ami                    = "ami-02c3627b04781eada" # AmazonLinux2のAMI ID
+  instance_type          = "t3.micro"
+  subnet_id              = aws_subnet.demo_subnet.id
+  vpc_security_group_ids = [aws_security_group.demo_sg.id]
+  key_name               = "登録済みSSH鍵名"
+
+  tags = {
+    Name = "tf-demo"
+  }
+}
+```
+
+記述したら
+
+
+```sh
+$ terraform plan
+```
+
+で適用内容を確認し、
+
+```sh
+$ terraform apply
+```
+
+で適用します。
+
+次のコマンドで外部公開のDNS名を取得し、接続できるか試してみましょう。
+
+```sh
 $ terraform show | grep -e "public_dns"
 # => ec2-18-181-217-113.ap-northeast-1.compute.amazonaws.com など接続DNS名を取得
 ```
 
-「terraform show」の行では、生成されたインスタンスにアクセスするため公開ドメイン名を取得しています。
+
+## 最後に
+
+今回細かくVPCからEC2のリソースを定義しました。
+AWSの各リソースを自分で定義しないといけないためクラウド環境の構成をよく知っていないと使いこなすのは難しいです。
+ただ、構成をコードの形で定義しておくと、デプロイでミスを減らせれるし、人にもお任せできるのでよいツールだなと思いました。
+
+まだまだ説明できていない機能があり、もっと複雑な構成（インスタンスを2つ、3つ作るなど）ができるので、
+クラウドを使う場合はなるべくterraformで定義しようと思います。
+
+※ちなみにterraformではEC2インスタンスの停止はできないので、停止したい場合はマネジメントコンソールでの操作が必要です。
+
+
+最終的なコードは次のとおりとなります。
+
+```terraform
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 3.0"
+    }
+  }
+
+  required_version = ">= 0.14.9"
+}
+
+# Provider
+# https://registry.terraform.io/providers/hashicorp/aws/latest/docs
+provider "aws" {
+  region = "ap-northeast-1"
+
+  # 全てのリソースに同じタグを設定する
+  default_tags {
+    tags = {
+      Name = "tf-demo"
+    }
+  }
+}
+
+# Local Variables
+# https://www.terraform.io/language/values/locals
+locals {
+  ami_id      = "ami-02c3627b04781eada" # AmazonLinux2のAMI
+  my_key_name = "rkw_home"
+}
+
+# Instance
+# https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/instance
+resource "aws_instance" "demo" {
+  ami                    = local.ami_id
+  instance_type          = "t3.micro"
+  subnet_id              = aws_subnet.demo_subnet.id
+  vpc_security_group_ids = [aws_security_group.demo_sg.id]
+  key_name               = local.my_key_name
+}
+
+# VPC
+# https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc
+resource "aws_vpc" "demo_vpc" {
+  cidr_block           = "10.0.0.0/16"
+  enable_dns_hostnames = true
+}
+
+# Subnet
+# https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/subnet
+resource "aws_subnet" "demo_subnet" {
+  vpc_id                  = aws_vpc.demo_vpc.id
+  cidr_block              = "10.0.1.0/24"
+  map_public_ip_on_launch = true
+}
+
+# Internet Gateway
+# https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/internet_gateway
+resource "aws_internet_gateway" "demo_igw" {
+  vpc_id = aws_vpc.demo_vpc.id
+}
+
+# Route Table
+# https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/route_table
+resource "aws_route_table" "demo_rt_tbl" {
+  vpc_id = aws_vpc.demo_vpc.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.demo_igw.id
+  }
+}
+
+# Route Table Associate
+# https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/route_table_association
+resource "aws_route_table_association" "demo_rt_assoc" {
+  subnet_id      = aws_subnet.demo_subnet.id
+  route_table_id = aws_route_table.demo_rt_tbl.id
+}
+
+# Security Group
+# https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/security_group
+resource "aws_security_group" "demo_sg" {
+  vpc_id      = aws_vpc.demo_vpc.id
+  description = "Terraform Demo"
+}
+
+# Security Group Rule
+# https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/security_group_rule
+resource "aws_security_group_rule" "demo_egress_allow_all" {
+  type              = "egress"
+  from_port         = 0
+  to_port           = 0
+  protocol          = "-1"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = aws_security_group.demo_sg.id
+}
+resource "aws_security_group_rule" "demo_allow_ssh" {
+  description       = "Allow SSH"
+  type              = "ingress"
+  from_port         = 22
+  to_port           = 22
+  protocol          = "tcp"
+  cidr_blocks       = ["133.32.176.221/32"]
+  security_group_id = aws_security_group.demo_sg.id
+}
+
+resource "aws_security_group_rule" "demo_allow_http" {
+  description       = "Allow HTTP"
+  type              = "ingress"
+  from_port         = 80
+  to_port           = 80
+  protocol          = "tcp"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = aws_security_group.demo_sg.id
+}
+```
