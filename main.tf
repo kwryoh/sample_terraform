@@ -27,6 +27,7 @@ provider "aws" {
 locals {
   ami_id      = "ami-02c3627b04781eada" # AmazonLinux2のAMI
   my_key_name = "rkw_home"
+  client_ip   = "133.32.176.221/32"
 }
 
 # Instance
@@ -101,7 +102,7 @@ resource "aws_security_group_rule" "demo_allow_ssh" {
   from_port         = 22
   to_port           = 22
   protocol          = "tcp"
-  cidr_blocks       = ["133.32.176.221/32"]
+  cidr_blocks       = [local.client_ip]
   security_group_id = aws_security_group.demo_sg.id
 }
 
